@@ -4,10 +4,10 @@ description: >
   End-to-end workflow for restoring a dead website from the Wayback Machine into a
   clean, deployable static site. Use when the user says "restore <domain>",
   "revive an expired domain", or "download from wayback". Self-contained: ships
-  with a non-interactive downloader wrapper and three cleanup scripts. Covers
-  the three repeatable phases: (1) download snapshot, (2) strip wayback
-  injections and archive.org URLs from assets, (3) production cleanup
-  (Cloudflare email obfuscation, unused chunks, analytics).
+  with a non-interactive downloader wrapper and seven cleanup/recovery scripts.
+  Covers download, broken-link backfill from CDX, URL rewriting, wayback
+  injection stripping, missing-asset mirroring from live sister sites, Cloudflare
+  email decoding, and a UTF-8 dev server with CMS widget XHR stubs.
 ---
 
 # Wayback Restore
@@ -51,6 +51,33 @@ directly:
 cd "$SKILL_DIR" && node node_modules/wayback-machine-downloader/cli.js
 ```
 
+## Phase 1.5 — Backfill broken links from CDX
+
+The interactive downloader frequently skips category pages and individual
+product/article pages even when Wayback has snapshots. Walk every `<a href>`,
+find broken local targets, query the Wayback CDX, and fetch what exists:
+
+```bash
+node "$SKILL_DIR/scripts/backfill-links.js" <site-dir> <origin-host>
+# e.g. node scripts/backfill-links.js websites/example.com www.example.com
+```
+
+Backfilled HTML comes from Wayback's raw `id_/` endpoint, so it has absolute
+origin URLs (`https://www.example.com/X`) instead of relative paths. Always
+follow with the rewriter:
+
+```bash
+node "$SKILL_DIR/scripts/rewrite-absolute.js" <site-dir> <origin-host>
+```
+
+Re-run `backfill-links.js` 2–4 more times — newly-backfilled pages reveal more
+broken links. Converges in a few iterations. Pages truly absent from Wayback
+are logged to `<site-dir>/.backfill.log`.
+
+The backfill script skips dynamic prefixes (`account/`, `checkout/`,
+`wishlist/`, `widgets/`, `detail/`, `navigation/`, `config-start/`, `customer/`)
+since those need a live backend and won't be in the archive.
+
 ## Phase 2 — Strip Wayback artifacts
 
 The Wayback Machine injects two kinds of contamination:
@@ -68,15 +95,6 @@ node "$SKILL_DIR/scripts/strip-wayback-urls.js" <site-dir>
 node "$SKILL_DIR/scripts/strip-wayback-artifacts.js" <site-dir>
 ```
 
-Where `<site-dir>` is e.g. `$SKILL_DIR/websites/example.com` (or wherever you
-sent the download with `--out`).
-
-`strip-wayback-urls.js` rewrites archive.org URL wrappers across all text files
-(`.html`, `.css`, `.js`, `.json`, `.xml`, `.svg`, `.txt`, `.map`).
-`strip-wayback-artifacts.js` scans CSS/JS/HTML, finds the earliest injection
-marker, walks backward to the start of the injected block (`/*`, triple
-newline, or `<script`), and truncates there.
-
 Verify clean:
 
 ```bash
@@ -85,7 +103,27 @@ grep -rlE 'archive\.org|WAYBACK|_____WB' <site-dir> || echo "clean"
 
 ## Phase 3 — Production cleanup
 
-### Cloudflare email decoding
+### 3a. Mirror missing assets from a live sister site (optional, very effective)
+
+Many businesses run sibling shops on the same template (`example.de`, `.at`,
+`.ch`, `.nl`) backed by one server that serves every site's exact asset paths.
+If you find such a sibling, you can mirror every missing CSS/JS/image:
+
+```bash
+node "$SKILL_DIR/scripts/mirror-missing-assets.js" <site-dir> <upstream-base-url>
+# e.g. node scripts/mirror-missing-assets.js websites/example.dk https://www.example.de
+```
+
+Walks every HTML file, extracts asset references (link href, script src, img
+src/srcset, picture/source, CSS `url(...)`), and for each missing local path
+fetches `<upstream>/<same path>` and writes it. Recurses one level into
+downloaded CSS to pull nested `url(...)` deps. Failed URLs go to
+`<site-dir>/.mirror-failed.log`.
+
+To find a sister site: open the homepage and grep for absolute URLs to other
+domains owned by the same business (often listed in the language switcher).
+
+### 3b. Cloudflare email decoding
 
 If the original site sat behind Cloudflare, emails will be obfuscated with
 `data-cfemail` attributes and a decoder script. Run:
@@ -101,7 +139,7 @@ Verify:
 grep -rlE 'data-cfemail|/cdn-cgi/l/email-protection' <site-dir> || echo "clean"
 ```
 
-### Unused chunks and analytics
+### 3c. Unused chunks and analytics
 
 Site-specific (the chunk set differs per CMS/template), no general script:
 
@@ -114,21 +152,37 @@ Site-specific (the chunk set differs per CMS/template), no general script:
 
 ## Verification before handoff
 
+Use the bundled Node static server (preferred over `python3 -m http.server`):
+it sends `Content-Type: text/html; charset=utf-8` so Danish/German/Swedish
+characters render correctly, and returns empty `200` for typical CMS XHR
+widget paths (`/widgets/*`, `/checkout/*`, `/wishlist/*`, `/account/*`,
+`/customer/*`) so the page's own JS doesn't inject the server's 404 HTML into
+cart/wishlist placeholders.
+
 ```bash
 grep -rlE 'archive\.org|WAYBACK|_____WB' <site-dir>
 grep -rlE 'data-cfemail|/cdn-cgi/l/email-protection' <site-dir>
-cd <site-dir> && python3 -m http.server 8080
+
+node "$SKILL_DIR/scripts/serve.js" <site-dir> 8080
 ```
 
-Open `http://localhost:8080`, click through main nav, check console for 404s
-and JS errors.
+Open `http://localhost:8080`, click through the main nav, hit a category page,
+hit a product/article page, check the console for 404s and JS errors.
+
+Python's `http.server` works as a fallback but will (a) garble non-ASCII chars
+in the `<title>` because it omits the charset header and (b) make broken
+widget XHRs inject visible "Error response 404" HTML into the cart/header.
 
 ## Files in this skill
 
 - `download.js` — non-interactive Wayback downloader (wraps the npm package)
-- `scripts/strip-wayback-urls.js` — strips archive.org URL wrappers
-- `scripts/strip-wayback-artifacts.js` — strips injected wombat/toolbar blocks
-- `scripts/clean-cloudflare-emails.js` — decodes CF-obfuscated emails
+- `scripts/backfill-links.js` — find broken `<a href>` targets, query CDX, fetch
+- `scripts/rewrite-absolute.js` — rewrite absolute origin URLs to root-relative
+- `scripts/strip-wayback-urls.js` — strip archive.org URL wrappers
+- `scripts/strip-wayback-artifacts.js` — strip injected wombat/toolbar blocks
+- `scripts/mirror-missing-assets.js` — mirror missing assets from a live sister site
+- `scripts/clean-cloudflare-emails.js` — decode CF-obfuscated emails
+- `scripts/serve.js` — UTF-8 static server with CMS widget XHR stubs
 - `package.json` — declares the `wayback-machine-downloader` dependency
 
 ## Related
