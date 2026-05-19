@@ -3,67 +3,73 @@ name: wayback-restore
 description: >
   End-to-end workflow for restoring a dead website from the Wayback Machine into a
   clean, deployable static site. Use when the user says "restore <domain>",
-  "revive an expired domain", "download from wayback", or is working in this repo
-  (cli.js, lib/downloader.js, scripts/strip-wayback-urls.js,
-  scripts/strip-wayback-artifacts.js, scripts/clean-cloudflare-emails.js,
-  websites/<host>/). Covers the three repeatable phases: (1) download snapshot,
-  (2) strip wayback injections and archive.org URLs from assets,
-  (3) production cleanup (Cloudflare email obfuscation, unused chunks, analytics).
+  "revive an expired domain", or "download from wayback". Self-contained: ships
+  with a non-interactive downloader wrapper and three cleanup scripts. Covers
+  the three repeatable phases: (1) download snapshot, (2) strip wayback
+  injections and archive.org URLs from assets, (3) production cleanup
+  (Cloudflare email obfuscation, unused chunks, analytics).
 ---
 
 # Wayback Restore
 
-Use this skill when restoring a site from the Wayback Machine using this repo's
-tooling. The workflow has three repeatable phases, each backed by a committed,
-directory-agnostic script under `scripts/`. The ad-hoc `download-*.js`,
-`fix-budsandbrews-*.js`, `fix-console-errors*.js`, etc. in the repo root are
-**site-specific one-offs from prior restores** — don't run them on a new site.
-Use the canonical commands below.
+Self-contained skill — all tooling lives in this skill's base directory. Run
+every command from `$SKILL_DIR` (the skill's base directory; shown to you at
+invocation time). Output sites land in `$SKILL_DIR/websites/<host>/`.
+
+## One-time setup
+
+The skill depends on the npm package `wayback-machine-downloader`. On first
+use (or if `$SKILL_DIR/node_modules` is missing), install deps:
+
+```bash
+cd "$SKILL_DIR" && npm install
+```
 
 ## Phase 1 — Download the snapshot
 
 ```bash
-node cli.js
+cd "$SKILL_DIR" && node download.js <domain>
 ```
 
-Interactive prompts:
+Optional flags: `--out <dir>`, `--from <YYYYMMDDhhmmss>`, `--to <YYYYMMDDhhmmss>`, `--threads <n>`.
 
-- **Domain or URL**: e.g. `example.com` (no protocol needed; normalized internally)
-- **From / To timestamp** (`YYYYMMDDhhmmss`): leave blank to take all snapshots, or
-  narrow to a single capture window if the site changed substantially over time
-- **Rewrite links**: answer `yes` (relative) for sites you'll self-host. Default
-  `as-is` only if you'll serve under the original origin
-- **Canonical**: if rewriting, answer `remove` unless the canonical tags are still
-  valid for the new host
-- **Threads**: 3 is the default; bump to 5–8 for large sites if you're not getting
-  rate-limited by archive.org
-- **Exact URL**: `no` (default) — wildcard `/*` grabs the whole tree
-- **Target directory**: blank → `websites/<host>/`
-- **Download external assets**: `no` unless the site genuinely depends on
-  third-party CDN assets you also want vendored locally
+Defaults: rewrite=relative, canonical=remove, exact_url=false, threads=5,
+external assets off, output dir `$SKILL_DIR/websites/<host>/`.
 
-Output lands in `websites/<host>/`.
+Examples:
 
-For non-interactive runs (scripted restores), copy `download-aquafaba.js` as a
-template — it instantiates `WaybackMachineDownloader` directly.
+```bash
+node download.js example.com
+node download.js example.com --from 20230101000000 --to 20231231235959 --threads 8
+node download.js example.com --out /custom/path/example.com
+```
+
+For interactive use (prompts for every option), invoke the upstream CLI
+directly:
+
+```bash
+cd "$SKILL_DIR" && node node_modules/wayback-machine-downloader/cli.js
+```
 
 ## Phase 2 — Strip Wayback artifacts
 
 The Wayback Machine injects two kinds of contamination:
 
-1. **URL wrappers** like `//web.archive.org/web/20231001120000im_/` prefixed to
-   every asset URL inside HTML/CSS/JS.
-2. **Toolbar/wombat script blocks** appended to CSS/JS files. Markers include
+1. **URL wrappers** like `//web.archive.org/web/20231001120000im_/` prefixed
+   to every asset URL inside HTML/CSS/JS.
+2. **Toolbar/wombat script blocks** appended to CSS/JS files. Markers:
    `FILE ARCHIVED ON`, `JAVASCRIPT APPENDED BY WAYBACK MACHINE`,
    `var _____WB$wombat`, `var RufflePlayer`.
 
-Run both committed scripts against the site directory — they walk recursively
-and auto-detect contaminated files:
+Run both scripts against the site directory:
 
 ```bash
-node scripts/strip-wayback-urls.js websites/<host>/
-node scripts/strip-wayback-artifacts.js websites/<host>/
+node "$SKILL_DIR/scripts/strip-wayback-urls.js" <site-dir>
+node "$SKILL_DIR/scripts/strip-wayback-artifacts.js" <site-dir>
 ```
+
+Where `<site-dir>` is e.g. `$SKILL_DIR/websites/example.com` (or wherever you
+sent the download with `--out`).
 
 `strip-wayback-urls.js` rewrites archive.org URL wrappers across all text files
 (`.html`, `.css`, `.js`, `.json`, `.xml`, `.svg`, `.txt`, `.map`).
@@ -71,16 +77,11 @@ node scripts/strip-wayback-artifacts.js websites/<host>/
 marker, walks backward to the start of the injected block (`/*`, triple
 newline, or `<script`), and truncates there.
 
-Both scripts print a verification pass at the end. After both have run, this
-should be silent:
+Verify clean:
 
 ```bash
-grep -rlE 'archive\.org|WAYBACK|_____WB' websites/<host>/ || echo "clean"
+grep -rlE 'archive\.org|WAYBACK|_____WB' <site-dir> || echo "clean"
 ```
-
-The original hardcoded copies (`fix-wayback-urls.js`, `fix-wayback-artifacts.js`)
-remain in the repo root as historical reference for the budsandbrewsusa.com
-restore. Don't run them on new sites — use the `scripts/` versions.
 
 ## Phase 3 — Production cleanup
 
@@ -90,59 +91,45 @@ If the original site sat behind Cloudflare, emails will be obfuscated with
 `data-cfemail` attributes and a decoder script. Run:
 
 ```bash
-node scripts/clean-cloudflare-emails.js websites/<host>/
+node "$SKILL_DIR/scripts/clean-cloudflare-emails.js" <site-dir>
 ```
 
-This walks every `.html` file, decodes `data-cfemail` payloads back to plain
-addresses, replaces the obfuscated anchors/spans with `mailto:` links, and
-strips the various Cloudflare decoder script blocks. Verify:
+Decodes payloads back to plain `mailto:` links and strips the decoder scripts.
+Verify:
 
 ```bash
-grep -rlE 'data-cfemail|/cdn-cgi/l/email-protection' websites/<host>/ || echo "clean"
+grep -rlE 'data-cfemail|/cdn-cgi/l/email-protection' <site-dir> || echo "clean"
 ```
 
 ### Unused chunks and analytics
 
-These steps remain site-specific (the chunk set differs per CMS/template) and
-have no general script:
+Site-specific (the chunk set differs per CMS/template), no general script:
 
-1. **Unused chunks** — open the homepage in a browser, watch the Network tab,
-   and delete any large bundled JS/CSS files that are never requested
-   (typical suspects from Wix-style sites: `background-*.js`, `gallery-*.js`,
+1. **Unused chunks** — serve the site locally, open the homepage, watch the
+   Network tab, and delete any large bundled JS/CSS files that are never
+   requested (typical Wix-style suspects: `background-*.js`, `gallery-*.js`,
    `course-*.js`). Be conservative; keep anything referenced from inline HTML.
 2. **Analytics** — strip `gtag`, `googletagmanager`, `facebook`, `hotjar`,
-   `clarity`, etc. script tags. `production-cleanup.js` in the repo root shows
-   the per-site pattern used for budsandbrewsusa.com.
+   `clarity` etc. script tags.
 
 ## Verification before handoff
 
 ```bash
-# No wayback contamination remains
-grep -rlE 'archive\.org|WAYBACK|_____WB' websites/<host>/
-
-# No CF email obfuscation
-grep -rlE 'data-cfemail|/cdn-cgi/l/email-protection' websites/<host>/
-
-# Serve locally and spot-check
-cd websites/<host>/ && python3 -m http.server 8080
+grep -rlE 'archive\.org|WAYBACK|_____WB' <site-dir>
+grep -rlE 'data-cfemail|/cdn-cgi/l/email-protection' <site-dir>
+cd <site-dir> && python3 -m http.server 8080
 ```
 
 Open `http://localhost:8080`, click through main nav, check console for 404s
 and JS errors.
 
-## Repo orientation for colleagues
+## Files in this skill
 
-- `cli.js` / `lib/downloader.js` — the actual downloader (upstream package; do
-  not modify casually)
-- `scripts/strip-wayback-urls.js`, `scripts/strip-wayback-artifacts.js`,
-  `scripts/clean-cloudflare-emails.js` — **canonical, directory-agnostic
-  cleanup tools**. Take `<dir>` as the only argument.
-- `websites/<host>/` — output directory, one folder per restored site
-- Root-level `download-*.js`, `fix-*.js`, `cleanup-*.js`,
-  `production-cleanup.js`, `clean-cloudflare-emails.js`, etc. —
-  **per-site historical scripts** from previous restores. Use as reference,
-  don't run blindly.
-- `dockerfile` / `index.js` — packaging for the downloader itself
+- `download.js` — non-interactive Wayback downloader (wraps the npm package)
+- `scripts/strip-wayback-urls.js` — strips archive.org URL wrappers
+- `scripts/strip-wayback-artifacts.js` — strips injected wombat/toolbar blocks
+- `scripts/clean-cloudflare-emails.js` — decodes CF-obfuscated emails
+- `package.json` — declares the `wayback-machine-downloader` dependency
 
 ## Related
 

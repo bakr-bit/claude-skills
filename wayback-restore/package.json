@@ -1,0 +1,19 @@
+{
+  "name": "wayback-restore-skill",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Vendored tooling for the wayback-restore Claude skill.",
+  "scripts": {
+    "download": "node download.js",
+    "strip-urls": "node scripts/strip-wayback-urls.js",
+    "strip-artifacts": "node scripts/strip-wayback-artifacts.js",
+    "clean-cf-emails": "node scripts/clean-cloudflare-emails.js"
+  },
+  "dependencies": {
+    "wayback-machine-downloader": "^0.5.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
